@@ -29,6 +29,10 @@ class PhhMmTelFeature(val slotId: Int) : PhhMmTelFeatureProtected(slotId) {
     }
 
     val imsSms = PhhImsSms(slotId)
+    // Listener of the outgoing call in progress, if any
+    @Volatile var outgoingListener: ImsCallSessionListener? = null
+    @Volatile var outgoingProfile: ImsCallProfile? = null
+    @Volatile var outgoingEstablished = false
     lateinit var sipHandler: SipHandler
 
     override fun createCallProfile(callSessionType: Int, callType: Int): ImsCallProfile {
@@ -61,6 +65,9 @@ class PhhMmTelFeature(val slotId: Int) : PhhMmTelFeatureProtected(slotId) {
 
             override fun start(callee: String, profile: ImsCallProfile) {
                 Rlog.d(TAG, "Starting call with $callee profile $profile")
+                outgoingListener = mListener
+                outgoingProfile = profile
+                outgoingEstablished = false
                 sipHandler.call(callee)
             }
 
@@ -79,7 +86,15 @@ class PhhMmTelFeature(val slotId: Int) : PhhMmTelFeatureProtected(slotId) {
 
             override fun terminate(reason: Int) {
                 Rlog.d(TAG, "Terminating call with reason $reason")
-                mListener.callSessionTerminated(ImsReasonInfo(ImsReasonInfo.CODE_USER_TERMINATED, 0, "Kikoo"))
+                val established = outgoingEstablished
+                outgoingListener = null
+                sipHandler.terminateCall()
+                // A call that never started is a failed start for the framework,
+                // otherwise it keeps it as the pending outgoing call
+                if (established)
+                    mListener.callSessionTerminated(ImsReasonInfo(ImsReasonInfo.CODE_USER_TERMINATED, 0, "Kikoo"))
+                else
+                    mListener.callSessionInitiatedFailed(ImsReasonInfo(ImsReasonInfo.CODE_USER_TERMINATED, 0, ""))
             }
         }
     }
@@ -140,6 +155,11 @@ class PhhMmTelFeature(val slotId: Int) : PhhMmTelFeatureProtected(slotId) {
 
             callProfile.setCallExtra(ImsCallProfile.EXTRA_OI, from)
             callProfile.setCallExtra(ImsCallProfile.EXTRA_DISPLAY_TEXT, from)
+            // Without OIR/CNAP the presentation reads as unknown, and the call log shows no number
+            val presentation = if (from.isEmpty()) ImsCallProfile.OIR_PRESENTATION_UNKNOWN
+                else ImsCallProfile.OIR_PRESENTATION_NOT_RESTRICTED
+            callProfile.setCallExtraInt(ImsCallProfile.EXTRA_OIR, presentation)
+            callProfile.setCallExtraInt(ImsCallProfile.EXTRA_CNAP, presentation)
             notifyIncomingCall(object: ImsCallSessionImplBase() {
                 var mState = State.IDLE
                 override fun getCallProfile(): ImsCallProfile {
@@ -196,9 +216,37 @@ class PhhMmTelFeature(val slotId: Int) : PhhMmTelFeatureProtected(slotId) {
 
             }, Bundle())
         }
-        sipHandler.onCancelledCall = { param: Object, s: String, map: Map<String, String> ->
+        sipHandler.onOutgoingProgress = {
+            Rlog.d(TAG, "Outgoing call progressing")
+            outgoingListener?.callSessionProgressing(ImsStreamMediaProfile(
+                ImsStreamMediaProfile.AUDIO_QUALITY_AMR, ImsStreamMediaProfile.DIRECTION_SEND_RECEIVE,
+                ImsStreamMediaProfile.VIDEO_QUALITY_NONE, ImsStreamMediaProfile.DIRECTION_INVALID,
+                ImsStreamMediaProfile.RTT_MODE_DISABLED))
+        }
+        sipHandler.onOutgoingStarted = {
+            Rlog.d(TAG, "Outgoing call started")
+            outgoingEstablished = true
+            outgoingListener?.callSessionInitiated(outgoingProfile ?: ImsCallProfile())
+        }
+        sipHandler.onCancelledCall = cancelled@{ param: Object, s: String, map: Map<String, String> ->
             Rlog.d(TAG, "Cancelling call")
             val statusCode = map["statusCode"]?.toInt() ?: -1
+            val mo = outgoingListener
+            if (mo != null) {
+                outgoingListener = null
+                if (statusCode >= 400 && !outgoingEstablished) {
+                    val reason = when (statusCode) {
+                        486, 600 -> ImsReasonInfo.CODE_SIP_BUSY
+                        480 -> ImsReasonInfo.CODE_SIP_TEMPRARILY_UNAVAILABLE
+                        404, 484 -> ImsReasonInfo.CODE_SIP_NOT_FOUND
+                        else -> ImsReasonInfo.CODE_SIP_REQUEST_CANCELLED
+                    }
+                    mo.callSessionInitiatedFailed(ImsReasonInfo(reason, statusCode, map["statusString"] ?: ""))
+                } else {
+                    mo.callSessionTerminated(ImsReasonInfo(ImsReasonInfo.CODE_USER_TERMINATED_BY_REMOTE, 0, "Kikoo"))
+                }
+                return@cancelled
+            }
             if (statusCode >= 400) {
                 val statusMessage = map["statusString"] ?: "Kikoo"
                 callListener?.callSessionTerminated(ImsReasonInfo(ImsReasonInfo.CODE_NETWORK_REJECT, 0, statusMessage))
