@@ -1130,7 +1130,9 @@ a=sendrecv
                         // Anyway in mode = 7 = 12.2KHz, we don't.
                         //val lastByte = (encoderData[bufPos + frameSize - 1].toUByte().toUInt().toInt() and 0x3) shl 6
 
-                        val buf = if (call.octetAligned) {
+                        // DTMF digits replace the audio frames while they are sent
+                        val dtmfBuf = nextDtmfPacket(call, sequenceNumber, timestamp)
+                        val buf = dtmfBuf ?: if (call.octetAligned) {
                             // Storage format frame is already ToC + octet aligned speech bits
                             val toc = (encoderData[bufPos].toInt() and 0x78) or 0x04
                             (rtpHeader + (cmr shl 4) + toc).map { it.toByte() }.toByteArray() +
@@ -1351,6 +1353,52 @@ a=sendrecv
     val mediaStarted = AtomicBoolean(false)
 
     /*
+     * DTMF (RFC 4733 telephone-event) in the RTP stream of the call: 5 event
+     * packets of 20ms, then the end packet three times.
+     */
+    private val dtmfQueue = java.util.concurrent.ConcurrentLinkedQueue<Char>()
+    private var dtmfEvent = -1
+    private var dtmfStartTs = 0
+    private var dtmfFrames = 0
+    private var dtmfEndRepeats = 0
+
+    fun queueDtmf(c: Char) {
+        Rlog.d(TAG, "Queueing DTMF $c")
+        dtmfQueue.add(c)
+    }
+
+    private fun nextDtmfPacket(call: Call, seq: Int, ts: Int): ByteArray? {
+        if (dtmfEvent < 0) {
+            val c = dtmfQueue.poll() ?: return null
+            dtmfEvent = when (c) {
+                in '0'..'9' -> c - '0'
+                '*' -> 10
+                '#' -> 11
+                in 'A'..'D' -> 12 + (c - 'A')
+                in 'a'..'d' -> 12 + (c - 'a')
+                else -> return null
+            }
+            dtmfStartTs = ts
+            dtmfFrames = 0
+            dtmfEndRepeats = 0
+        }
+        val end = dtmfFrames >= 5
+        if (!end) dtmfFrames++
+        val duration = dtmfFrames * 160
+        val marker = if (dtmfFrames == 1 && !end) 0x80 else 0
+        val packet = listOf(
+            0x80, marker or call.dtmfTrack,
+            (seq shr 8) and 0xff, seq and 0xff,
+            (dtmfStartTs shr 24) and 0xff, (dtmfStartTs shr 16) and 0xff, (dtmfStartTs shr 8) and 0xff, dtmfStartTs and 0xff,
+            0x03, 0x00, 0xd2, 0x00, //SSRC
+            dtmfEvent, (if (end) 0x80 else 0) or 10, //volume -10 dBm0
+            (duration shr 8) and 0xff, duration and 0xff,
+        ).map { it.toByte() }.toByteArray()
+        if (end && ++dtmfEndRepeats >= 3) dtmfEvent = -1
+        return packet
+    }
+
+    /*
      * INVITE of the stock LG U+ terminals (EF59L, Beehd): the LG U+ service headers
      * and feature tags. Without m_convert, the calls to some terminals of the other
      * carriers fail (404/503) when they are idle.
@@ -1380,6 +1428,8 @@ a=sendrecv
     fun call(phoneNumber: String) {
         thread {
             // Fresh state for this call
+            dtmfQueue.clear()
+            dtmfEvent = -1
             callStopped.set(false)
             callStarted.set(false)
             mediaStarted.set(false)

@@ -84,6 +84,18 @@ class PhhMmTelFeature(val slotId: Int) : PhhMmTelFeatureProtected(slotId) {
                 Rlog.d(TAG, "Rejecting call with reason $reason")
             }
 
+            override fun sendDtmf(c: Char, result: android.os.Message?) {
+                sipHandler.queueDtmf(c)
+                result?.sendToTarget()
+            }
+
+            override fun startDtmf(c: Char) {
+                sipHandler.queueDtmf(c)
+            }
+
+            override fun stopDtmf() {
+            }
+
             override fun terminate(reason: Int) {
                 Rlog.d(TAG, "Terminating call with reason $reason")
                 val established = outgoingEstablished
@@ -207,6 +219,18 @@ class PhhMmTelFeature(val slotId: Int) : PhhMmTelFeatureProtected(slotId) {
                 override fun reject(reason: Int) {
                     sipHandler.rejectCall()
                     Rlog.d(TAG, "Rejecting call $reason")
+                }
+
+                override fun sendDtmf(c: Char, result: android.os.Message?) {
+                    sipHandler.queueDtmf(c)
+                    result?.sendToTarget()
+                }
+
+                override fun startDtmf(c: Char) {
+                    sipHandler.queueDtmf(c)
+                }
+
+                override fun stopDtmf() {
                 }
 
                 override fun terminate(reason: Int) {
