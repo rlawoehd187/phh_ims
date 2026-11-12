@@ -14,7 +14,6 @@ import android.telephony.ims.feature.MmTelFeature
 import android.telephony.ims.feature.RcsFeature
 import android.telephony.ims.stub.ImsConfigImplBase
 import android.telephony.ims.stub.ImsRegistrationImplBase
-import android.telephony.imsmedia.ImsMediaManager
 
 class PhhImsService : ImsService() {
     companion object {
@@ -29,7 +28,7 @@ class PhhImsService : ImsService() {
 
         val intentFilter = IntentFilter()
         intentFilter.addAction(receiver.ALARM_PERIODIC_REGISTER)
-        this.registerReceiver(receiver, intentFilter, Context.RECEIVER_NOT_EXPORTED)
+        this.registerReceiver(receiver, intentFilter)
 
         this.armPeriodicRegisterAlarm()
     }

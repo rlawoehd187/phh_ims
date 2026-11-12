@@ -10,7 +10,25 @@ android_app {
       "com.google.android.material_material",
       "kotlinx-coroutines-android",
     ],
+    jni_libs: ["librnnoise_jni"],
     required: ["PhhImsOverlay"],
+}
+
+cc_library_shared {
+    name: "librnnoise_jni",
+    srcs: [
+        "app/jni/rnnoise_jni.c",
+        "app/jni/rnnoise/src/denoise.c",
+        "app/jni/rnnoise/src/kiss_fft.c",
+        "app/jni/rnnoise/src/rnn.c",
+        "app/jni/rnnoise/src/rnn_data.c",
+        "app/jni/rnnoise/src/pitch.c",
+        "app/jni/rnnoise/src/celt_lpc.c",
+    ],
+    export_include_dirs: ["app/jni/rnnoise/include"],
+    shared_libs: ["liblog"],
+    header_libs: ["jni_headers"],
+    cflags: ["-Wno-unused-parameter", "-Wno-unused-variable", "-Wno-unused-function", "-Wno-sign-compare", "-Wno-implicit-function-declaration"],
 }
 
 runtime_resource_overlay {
