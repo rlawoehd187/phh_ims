@@ -5,6 +5,9 @@ import android.telephony.Rlog
 import android.telephony.TelephonyManager
 import android.util.Base64
 
+/* set when the identities come from the ISIM */
+var useIsimForAka = false
+
 data class SipAkaResult(val res: ByteArray, val ck: ByteArray, val ik: ByteArray)
 
 private const val TAG = "PHH SipChallenge"
@@ -22,7 +25,18 @@ fun sipAkaChallenge(tm: TelephonyManager, nonceB64: String): SipAkaResult {
     val challenge = Base64.encodeToString(challengeArray, Base64.NO_WRAP)
     Rlog.d(TAG, "Challenge B64 is $challenge")
 
+    // IMS AKA runs on the ISIM when there is one, some carriers (KT) reject the USIM keys
     val responseB64 =
+        (if (useIsimForAka) try {
+            tm.getIccAuthentication(
+                TelephonyManager.APPTYPE_ISIM,
+                TelephonyManager.AUTHTYPE_EAP_AKA,
+                challenge
+            )
+        } catch (t: Throwable) {
+            Rlog.d(TAG, "ISIM AKA failed, trying the USIM")
+            null
+        } else null) ?:
         tm.getIccAuthentication(
             TelephonyManager.APPTYPE_USIM,
             TelephonyManager.AUTHTYPE_EAP_AKA,

@@ -1,7 +1,31 @@
 //SPDX-License-Identifier: GPL-2.0
 package me.phh.sip
 
+
 import java.util.concurrent.atomic.AtomicInteger
+
+/* Some carriers only accept the user agent format they certified (e.g. TTA for KT) */
+var sipUserAgent = "SM-A546B-YY Samsung IMS 7.0"
+// Set by the carrier defaults when the carrier registers without IPsec
+var sipCarrierNoIpsec = false
+
+/* KT only accepts IPsec from TTA terminals, the older ones register without sec-agree */
+val sipUseIpsec: Boolean
+    // persist.vendor.ims.ipsec=0/1 forces it, KT and SKT terminals register without IPsec
+    get() = when (android.os.SystemProperties.get("persist.vendor.ims.ipsec", "")) {
+        "0" -> false
+        "1" -> true
+        else -> !sipCarrierNoIpsec && !sipUserAgent.startsWith("KT-client/")
+    }
+
+private fun withoutSecAgree(headers: SipHeadersMap): SipHeadersMap =
+    headers.filterKeys { it != "security-client" && it != "security-verify" }
+        .mapValues { (key, values) ->
+            if (key == "require" || key == "proxy-require" || key == "supported")
+                values.map { v -> v.split(",").map { it.trim() }.filter { it.isNotEmpty() && it != "sec-agree" }.joinToString(", ") }
+                    .filter { it.isNotEmpty() }
+            else values
+        }.filterValues { it.isNotEmpty() }
 
 /* type definitions */
 
@@ -124,7 +148,7 @@ open class SipCommonMessage(
             newHeaders["max-forwards"] = listOf("70")
         }
         if (headersParam["user-agent"] == null) {
-            newHeaders["user-agent"] = listOf("SM-A546B-YY Samsung IMS 7.0")
+            newHeaders["user-agent"] = listOf(sipUserAgent)
         }
         val via = headersParam["via"]
         if (via != null) {
@@ -137,7 +161,8 @@ open class SipCommonMessage(
                     }
                 }
         }
-        return headersParam + newHeaders
+        val all = headersParam + newHeaders
+        return if (sipUseIpsec) all else withoutSecAgree(all)
     }
 }
 
@@ -268,6 +293,8 @@ fun sipHeaderOf(line: String): Pair<String, List<SipHeader>>? {
             "contact",
             "from",
             "p-asserted-identity",
+            "record-route",
+            "route",
             "security-client",
             "security-verify",
             "supported",

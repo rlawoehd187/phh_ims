@@ -18,3 +18,7 @@ fun String.hexToByteArray(): ByteArray {
 }
 
 fun randomBytes(count: Int): ByteArray = Random.Default.nextBytes(count)
+
+// SDP lines must end with CRLF (RFC 4566)
+fun String.sdpBytes(): ByteArray =
+    (this.replace("\r\n", "\n").replace("\n", "\r\n") + "\r\n").toByteArray()
