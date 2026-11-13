@@ -688,6 +688,12 @@ class SipHandler(val ctxt: Context) {
                             Thread.sleep(4000)
                             connect()
                         }
+                    } else if (_network != network) {
+                        // The sockets, timers and dialogs are all bound to the old
+                        // network: start again from scratch, telephony binds the
+                        // service again
+                        Rlog.w(TAG, "IMS network changed from $network to $_network, restarting")
+                        android.os.Process.killProcess(android.os.Process.myPid())
                     } else {
                         Rlog.d(TAG, "... don't try anything")
                     }
