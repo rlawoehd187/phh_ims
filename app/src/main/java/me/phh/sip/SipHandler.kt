@@ -348,7 +348,12 @@ class SipHandler(val ctxt: Context) {
         Rlog.d(TAG, "Trying to connect to SIP server")
         val lp = connectivityManager.getLinkProperties(network)
         Rlog.d(TAG, "Got link properties $lp")
-        val pcscfs = (lp!!.javaClass.getMethod("getPcscfServers").invoke(lp) as List<*>).sortedBy { if(it is Inet6Address) 0 else 1 }
+        if (lp == null) {
+            // The network went away meanwhile (airplane mode...), the next one restarts us
+            Rlog.w(TAG, "IMS network $network is gone, waiting for the next one")
+            return
+        }
+        val pcscfs = (lp.javaClass.getMethod("getPcscfServers").invoke(lp) as List<*>).sortedBy { if(it is Inet6Address) 0 else 1 }
         val pcscf = if (pcscfs.isNotEmpty()) {
             pcscfs[0] as InetAddress
         } else {
@@ -686,7 +691,12 @@ class SipHandler(val ctxt: Context) {
                         network = _network
                         thread {
                             Thread.sleep(4000)
-                            connect()
+                            try {
+                                connect()
+                            } catch (t: Throwable) {
+                                // e.g. the network went away while registering
+                                Rlog.e(TAG, "Failed to connect to the IMS network", t)
+                            }
                         }
                     } else if (_network != network) {
                         // The sockets, timers and dialogs are all bound to the old
