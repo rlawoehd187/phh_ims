@@ -258,8 +258,11 @@ class PhhMmTelFeature(val slotId: Int) : PhhMmTelFeatureProtected(slotId) {
             val mo = outgoingListener
             if (mo != null) {
                 outgoingListener = null
-                if (statusCode >= 400 && !outgoingEstablished) {
+                if (statusCode >= 300 && !outgoingEstablished) {
                     val reason = when (statusCode) {
+                        // 380 Alternative Service: the network wants the call on CS (SKT 114...),
+                        // the framework dials it again there
+                        380 -> ImsReasonInfo.CODE_LOCAL_CALL_CS_RETRY_REQUIRED
                         486, 600 -> ImsReasonInfo.CODE_SIP_BUSY
                         480 -> ImsReasonInfo.CODE_SIP_TEMPRARILY_UNAVAILABLE
                         404, 484 -> ImsReasonInfo.CODE_SIP_NOT_FOUND

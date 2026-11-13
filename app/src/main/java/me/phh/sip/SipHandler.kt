@@ -86,7 +86,8 @@ class SipHandler(val ctxt: Context) {
         // Default to the user agents of the stock ef63 firmwares (the property is limited to 92 bytes)
         val carrierUa = when (mcc + mnc) {
             "450008" -> "KT-client/VoLTE+PSVT;IM-A910K;Device_Type=Android_Phone;Net_Type=LTE;SW_Ver=1.31"
-            "450005" -> "SKT-LTE-VoLTE1.0 IM-A910S_AND/2.1"
+            // the TTA user agent of the later stock SKT firmwares, the network takes it
+            "450005" -> "TTA-VoLTE/2.0 IM-A910S/S0224129 Device_Type/Android_Phone SKT"
             "450006" -> "LGUPlus-client/LTE_AT1.0+LTE_VT2.0+LTE_MSG1.0;IM-A910L;ver127;Device_Type=Android_Phone;305_use-proxy;md=1"
             else -> null
         }
@@ -167,7 +168,8 @@ class SipHandler(val ctxt: Context) {
         val (_, params) = challenge.headers["www-authenticate"]!![0].getAuthValues()
         val nonce = params["nonce"]!!
         val aka = sipAkaChallenge(telephonyManager, nonce)
-        return if (requireNonsessAka)
+        // Without qop in the challenge, the response has no cnonce/nc (RFC 2617, SKT)
+        return if (requireNonsessAka || params["qop"] == null)
             SipAkaDigest(user = user, realm = realm, uri = "sip:$realm", nonceB64 = nonce,
                 opaque = params["opaque"], akaResult = aka).toString()
         else
@@ -187,6 +189,31 @@ class SipHandler(val ctxt: Context) {
         """.toSipHeadersMap() + generateCallId()
     private var commonHeaders = "".toSipHeadersMap()
     private var contact = ""
+    // P-Access-Network-Info of the last registration
+    private var lastPani: String? = null
+    private fun accessNetworkInfo(): String {
+        val pani = try {
+            currentPani(telephonyManager.getAllCellInfo())
+        } catch (t: Throwable) { null }
+        if (pani != null) lastPani = pani
+        return lastPani ?: "3GPP-E-UTRAN-FDD"
+    }
+
+    // Access network of the serving LTE cell (TS 24.229 7.2A.4), like the stock terminals:
+    // SKT locates the callers of 114 and the like with it, and some networks only
+    // terminate the calls over IMS for terminals they know are on LTE
+    @SuppressLint("MissingPermission")
+    private fun currentPani(cellInfoList: List<android.telephony.CellInfo>?): String? {
+        val lteCells = cellInfoList.orEmpty().filterIsInstance<CellInfoLte>()
+        // the legacy RIL does not flag the registered cell
+        val id = (lteCells.firstOrNull { it.isRegistered } ?: lteCells.firstOrNull())?.cellIdentity ?: return null
+        if (id.tac == Int.MAX_VALUE || id.ci == Int.MAX_VALUE) return null
+        // the legacy RIL does not report the PLMN of the cell, use the one of the SIM;
+        // phh pads the MNC to 3 digits (ims.mnc005...), the cell id keeps its own length
+        val mccStr = id.mccString ?: mcc
+        val mncStr = id.mncString ?: mnc.trimStart('0').padStart(2, '0')
+        return "3GPP-E-UTRAN-FDD;utran-cell-id-3gpp=$mccStr$mncStr${"%04x".format(id.tac)}${"%07x".format(id.ci)}"
+    }
     private var mySip = ""
     private var myTel = ""
 
@@ -418,7 +445,7 @@ class SipHandler(val ctxt: Context) {
         Rlog.d(TAG, "Requesting AKA challenge")
         val akaResult = sipAkaChallenge(telephonyManager, nonceB64)
         akaDigest =
-            if(requireNonsessAka)
+            if(requireNonsessAka || wwwAuthenticateParams["qop"] == null)
                 SipAkaDigest(
                     user = user,
                     realm = realm,
@@ -678,8 +705,10 @@ class SipHandler(val ctxt: Context) {
 
         val sipInstance = "<urn:gsma:imei:${imei.substring(0,8)}-${imei.substring(8,14)}-0>"
         val transport = if (socket is SipConnectionTcp) "tcp" else "udp"
+        // SKT terminals register the mmtel service with video (stock firmware)
+        val mediaTags = if (mcc + mnc == "450005") "audio;video" else "audio"
         contact =
-            """<sip:${contactUser}@$local;transport=$transport>;expires=600000;+sip.instance="$sipInstance";+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel";+g.3gpp.smsip;audio"""
+            """<sip:${contactUser}@$local;transport=$transport>;expires=600000;+sip.instance="$sipInstance";+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel";+g.3gpp.smsip;$mediaTags"""
         val newHeaders =
             (if(socket is SipConnectionTcp) {
                 """
@@ -699,6 +728,8 @@ class SipHandler(val ctxt: Context) {
         val tm = ctxt.getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
 
         val cellInfoList = tm.getAllCellInfo()
+        val pani = currentPani(cellInfoList)
+        if (pani != null) lastPani = pani
         for(cell in cellInfoList) {
             if(cell is CellInfoLte) {
                 val cellIdentity = cell.cellIdentity
@@ -756,7 +787,8 @@ class SipHandler(val ctxt: Context) {
                     Require: sec-agree
                     Proxy-Require: sec-agree
                     $secClientLine
-                    """.toSipHeadersMap()
+                    """.toSipHeadersMap() +
+                    (if (pani != null) mapOf("p-access-network-info" to listOf(pani)) else emptyMap())
             ) // route present on all calls except this
         Rlog.d(TAG, "Sending $msg")
         synchronized(writer) { writer.write(msg.toByteArray()) }
@@ -823,7 +855,7 @@ class SipHandler(val ctxt: Context) {
                     Proxy-Require: sec-agree
                     Allow: INVITE, ACK, CANCEL, BYE, UPDATE, REFER, NOTIFY, INFO, MESSAGE, PRACK, OPTIONS
                     Accept: application/reginfo+xml
-                    P-Access-Network-Info: 3GPP-E-UTRAN-FDD;utran-cell-id-3gpp=20810b8c49752501
+                    P-Access-Network-Info: ${accessNetworkInfo()}
                     """.toSipHeadersMap()
             )
         if (!imsReady) {
@@ -946,7 +978,15 @@ a=sendrecv
     }
 
     // Uplink IP fragments are dropped by some networks, keep UDP messages under the MTU
-    val maxUdpMessage = 1400
+    val maxUdpMessage: Int
+        get() {
+            // MTU of the IMS interface minus the IP and UDP headers
+            val mtu = try {
+                java.net.NetworkInterface.getByInetAddress(localAddr)?.mtu ?: 0
+            } catch (t: Throwable) { 0 }
+            val overhead = if (localAddr is Inet6Address) 48 else 28
+            return if (mtu > overhead + 576) mtu - overhead else 1400
+        }
 
     fun handleCancel(request: SipRequest): Int {
         val callId = request.headers["call-id"]!![0]
@@ -1194,24 +1234,34 @@ a=sendrecv
                     body = call.sdp
                 )
             var msg3Bytes = msg3.toByteArray()
-            if (isControlSocketUdp && msg3Bytes.size > maxUdpMessage) {
+            val maxSize = maxUdpMessage
+            if (isControlSocketUdp && msg3Bytes.size > maxSize) {
                 val smallContact = """<sip:${contactUser}@$local;transport=$transport>;+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel";audio"""
-                // Compact header names (RFC 3261 7.3.3), no session timer
-                val compactNames = mapOf("via" to "v", "from" to "f", "to" to "t",
-                    "call-id" to "i", "content-type" to "c")
-                val smallHeaders = (myHeaders3 - "max-forwards" - "p-preferred-identity" - "user-agent" -
-                    "p-access-network-info" - "allow" - "supported" - "contact" - "require" - "session-expires")
-                    .mapKeys { (k, _) -> compactNames[k] ?: k } +
-                    mapOf("m" to listOf(smallContact))
                 val smallBody = call.compactSdp ?: call.sdp
-                val small = SipResponse(
+                // First drop the optional headers and shorten the SDP, keeping the header names
+                val reducedHeaders = myHeaders3 - "max-forwards" - "p-preferred-identity" - "user-agent" -
+                    "p-access-network-info" - "allow" - "supported" - "contact" - "require" - "session-expires" +
+                    mapOf("contact" to listOf(smallContact))
+                var small = SipResponse(
                     statusCode = 200,
                     statusString = "OK",
-                    headersParam = smallHeaders - "content-length" + ("l" to listOf("${smallBody.size}")),
+                    headersParam = reducedHeaders,
                     body = smallBody,
-                    autofill = false,
                 )
-                Rlog.d(TAG, "200 OK is ${msg3Bytes.size} bytes, sending compact one of ${small.toByteArray().size} bytes")
+                if (small.toByteArray().size > maxSize) {
+                    // Last resort, compact header names (RFC 3261 7.3.3): some networks ignore them
+                    val compactNames = mapOf("via" to "v", "from" to "f", "to" to "t",
+                        "call-id" to "i", "content-type" to "c", "contact" to "m")
+                    val compactHeaders = (reducedHeaders - "content-length").mapKeys { (k, _) -> compactNames[k] ?: k }
+                    small = SipResponse(
+                        statusCode = 200,
+                        statusString = "OK",
+                        headersParam = compactHeaders + ("l" to listOf("${smallBody.size}")),
+                        body = smallBody,
+                        autofill = false,
+                    )
+                }
+                Rlog.d(TAG, "200 OK is ${msg3Bytes.size} bytes (max $maxSize), sending a smaller one of ${small.toByteArray().size} bytes")
                 Rlog.d(TAG, "Sending $small")
                 msg3Bytes = small.toByteArray()
             } else {
@@ -1449,10 +1499,10 @@ a=sendrecv
 
             // The stock LG U+ terminals offer octet aligned AMR only (amrnb_oa_pt=96), the
             // interconnect with the other carriers does not cope well with bandwidth efficient
-            val offerOctetAligned = mcc + mnc == "450006"
+            val offerOctetAligned = mcc + mnc == "450006" || mcc + mnc == "450005"
             // The stock LG U+ offer has no QoS precondition, the terminating KT side does not
             // complete it and rejects the call
-            val offerPrecondition = mcc + mnc != "450006"
+            val offerPrecondition = mcc + mnc != "450006" && mcc + mnc != "450005"
             val amrTrack = if (offerOctetAligned) 96 else 97
             val amrFmtp = if (offerOctetAligned) "octet-align=1;max-red=0"
                 else "mode-change-capability=2;octet-align=0;max-red=0"
@@ -1494,6 +1544,15 @@ ${if (offerPrecondition) "a=curr:qos local none\na=curr:qos remote none\na=des:q
                     "tel:+82-" + formatted.substring(1)
                 else
                     "tel:$formatted;phone-context=lte-lguplus.co.kr"
+            } else if (mcc + mnc == "450005") {
+                // Dial plan of the stock SKT firmware
+                val digits = phoneNumber.filter { it != '-' && it != ' ' }
+                when {
+                    digits.startsWith("00") -> "tel:+" + digits.substring(2)
+                    digits.startsWith("0") -> "tel:+82-" + digits.substring(1)
+                    digits.startsWith("+") -> "tel:$digits"
+                    else -> "tel:$digits;phone-context=+82-10"
+                }
             } else {
                 "tel:$phoneNumber;phone-context=ims.mnc$mnc.mcc$mcc.3gppnetwork.org"
             }
@@ -1524,6 +1583,7 @@ ${if (offerPrecondition) "a=curr:qos local none\na=curr:qos remote none\na=des:q
                     Min-SE: 90
                     Accept-Contact: *;+g.3gpp.icsi-ref="urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel"
                     P-Preferred-Service: urn:urn-7:3gpp-service.ims.icsi.mmtel
+                    P-Access-Network-Info: ${accessNetworkInfo()}
                     Contact: $contactTel
                     """.toSipHeadersMap() + generateCallId() - "p-asserted-identity"
             val myHeaders = if (mcc + mnc == "450006") lguInviteHeaders(baseHeaders, local) else baseHeaders
@@ -1615,7 +1675,7 @@ ${if (offerPrecondition) "a=curr:qos local none\na=curr:qos remote none\na=des:q
                         Rlog.d(TAG, "Sending $failAck")
                         synchronized(sigWriter) { sigWriter.write(failAck.toByteArray()) }
                     }
-                    if(resp.statusCode >= 400) {
+                    if(resp.statusCode >= 300) {
                         // Stop the media threads started on 183
                         callStopped.set(true)
                         onCancelledCall?.invoke(Object(), "",
@@ -2078,7 +2138,7 @@ ${if (peerPrecondition) qosNone else ""}a=sendrecv
                         Contact: $contactTel
                         Allow: INVITE, ACK, CANCEL, BYE, UPDATE, REFER, NOTIFY, INFO, MESSAGE, PRACK, OPTIONS
                         Content-Type: application/sdp
-                        P-Access-Network-Info: 3GPP-E-UTRAN-FDD;utran-cell-id-3gpp=20810b8c49752501
+                        P-Access-Network-Info: ${accessNetworkInfo()}
                         """.toSipHeadersMap() +
                 (if (requires.isNotEmpty())
                     mapOf("require" to listOf(requires.joinToString(", ")), "rseq" to listOf("$mySeqCounter"))
@@ -2131,7 +2191,7 @@ ${if (peerPrecondition) qosNone else ""}a=sendrecv
                 val myHeaders2 = myHeaders - "rseq" - "content-type" - "require" +
                     """
 Supported: 100rel, replaces, timer
-P-Access-Network-Info: 3GPP-E-UTRAN-FDD;utran-cell-id-3gpp=4500620f331a5e06
+P-Access-Network-Info: ${accessNetworkInfo()}
 
 """.toSipHeadersMap()
                 val msg2 =
