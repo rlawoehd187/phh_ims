@@ -1239,6 +1239,13 @@ a=sendrecv
         }
     }
 
+    // RFC 3261 12.1.2: the requests in a dialog we started follow its Record-Route in reverse
+    // order, not the service route of the registration
+    private fun dialogRoute(resp: SipResponse): SipHeadersMap {
+        val routeSet = resp.headers["record-route"].orEmpty().reversed()
+        return if (routeSet.isNotEmpty()) mapOf("route" to routeSet) else emptyMap()
+    }
+
     fun prack(resp: SipResponse) {
         val who = extractDestinationFromContact(resp.headers["contact"]!![0])
         val callId = resp.headers["call-id"]!![0]
@@ -1248,13 +1255,13 @@ a=sendrecv
             SipRequest(
                 SipMethod.PRACK,
                 who,
-                headersParam = commonHeaders + """
+                headersParam = commonHeaders - "route" + """
                     RAck: $whatToPrack
                     Require: sec-agree
                     To: ${resp.headers["to"]!![0]}
                     From: ${resp.headers["from"]!![0]}
                     Call-Id: $callId
-                    """.toSipHeadersMap()
+                    """.toSipHeadersMap() + dialogRoute(resp)
             )
         Rlog.d(TAG, "Sending $msg")
         synchronized(sigWriter) { sigWriter.write(msg.toByteArray()) }
@@ -1702,8 +1709,9 @@ ${if (offerPrecondition) "a=curr:qos local none\na=curr:qos remote none\na=des:q
                         val msg2 =
                             SipRequest(
                                 SipMethod.UPDATE,
-                                to,
-                                currentCall!!.callHeaders + ("content-type" to listOf("application/sdp")),
+                                resp.headers["contact"]?.get(0)?.let { extractDestinationFromContact(it) } ?: to,
+                                currentCall!!.callHeaders - "route" + ("content-type" to listOf("application/sdp")) +
+                                    dialogRoute(resp),
                                 newSdp
                             )
                         Rlog.d(TAG, "Sending $msg2")
