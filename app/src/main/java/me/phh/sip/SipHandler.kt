@@ -1864,6 +1864,16 @@ ${if (offerPrecondition) "a=curr:qos local none\na=curr:qos remote none\na=des:q
     fun callDecodeThread() {
         // Receiving thread
         thread {
+            // Nothing to play on an incoming call before it is answered: the ringtone
+            // plays on the speaker meanwhile, and a voice call track switches the
+            // output to the earpiece and back all along, cutting the ringtone
+            if (currentCall?.outgoing == false) {
+                val dropBuf = ByteArray(2048)
+                while (!callStarted.get() && !callStopped.get()) {
+                    currentCall!!.rtpSocket.receive(DatagramPacket(dropBuf, dropBuf.size))
+                }
+                if (callStopped.get()) return@thread
+            }
             val minBufferSize = AudioTrack.getMinBufferSize(8000, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
             val audioTrack = AudioTrack(AudioManager.STREAM_VOICE_CALL, 8000, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT, minBufferSize, AudioTrack.MODE_STREAM)
             audioTrack.play()
